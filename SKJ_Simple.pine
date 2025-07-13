@@ -1,0 +1,67 @@
+//@version=5
+strategy("SKJ Simple - Signal Generator", shorttitle="SKJ-SIG", overlay=true, 
+         initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=2,
+         commission_type=strategy.commission.percent, commission_value=0.02, slippage=2)
+
+// === CORE INPUTS ===
+liquidity_lookback = input.int(15, "Liquidity Lookback", minval=5, maxval=30)
+sweep_threshold = input.float(0.3, "Sweep Threshold (ATR)", minval=0.1, maxval=0.8)
+volume_multiplier = input.float(1.5, "Volume Spike", minval=1.0, maxval=3.0)
+tp_ratio = input.float(1.8, "Take Profit Ratio", minval=1.0, maxval=3.0)
+risk_percent = input.float(1.0, "Risk %", minval=0.5, maxval=2.0)
+
+// === BASIC CALCULATIONS ===
+atr = ta.atr(14)
+vol_avg = ta.sma(volume, 20)
+trend_ema = ta.ema(close, 50)
+
+// === LIQUIDITY SWEEPS ===
+recent_high = ta.highest(high, liquidity_lookback)
+recent_low = ta.lowest(low, liquidity_lookback)
+atr_buffer = atr * sweep_threshold
+
+// Simple sweep detection
+bull_sweep = low < recent_low[1] and close > recent_low[1]
+bear_sweep = high > recent_high[1] and close < recent_high[1]
+
+// === ENGULFING PATTERNS ===
+bull_engulf = close > open and close[1] < open[1] and close > open[1] and open < close[1]
+bear_engulf = close < open and close[1] > open[1] and close < open[1] and open > close[1]
+
+// === VOLUME CONFIRMATION ===
+vol_spike = volume > vol_avg * volume_multiplier
+
+// === SIMPLE TREND FILTER ===
+is_uptrend = close > trend_ema
+is_downtrend = close < trend_ema
+
+// === ENTRY CONDITIONS ===
+long_condition = bull_sweep and bull_engulf and vol_spike and is_uptrend
+short_condition = bear_sweep and bear_engulf and vol_spike and is_downtrend
+
+// === POSITION SIZING ===
+risk_amount = strategy.equity * (risk_percent / 100)
+stop_distance = atr * 2
+position_size = risk_amount / stop_distance
+
+// === ENTRY ORDERS ===
+if long_condition and strategy.position_size == 0
+    strategy.entry("Long", strategy.long, qty=position_size)
+    strategy.exit("Long SL/TP", "Long", stop=low - stop_distance, limit=close + (stop_distance * tp_ratio))
+
+if short_condition and strategy.position_size == 0
+    strategy.entry("Short", strategy.short, qty=position_size)
+    strategy.exit("Short SL/TP", "Short", stop=high + stop_distance, limit=close - (stop_distance * tp_ratio))
+
+// === VISUAL SIGNALS ===
+plotshape(long_condition, title="Long Signal", location=location.belowbar, style=shape.labelup, color=color.green, textcolor=color.white, text="BUY")
+plotshape(short_condition, title="Short Signal", location=location.abovebar, style=shape.labeldown, color=color.red, textcolor=color.white, text="SELL")
+
+// === SUPPORT/RESISTANCE LEVELS ===
+plot(recent_high, color=color.red, linewidth=1, title="Recent High")
+plot(recent_low, color=color.green, linewidth=1, title="Recent Low")
+plot(trend_ema, color=color.blue, linewidth=2, title="Trend EMA")
+
+// === ALERTS ===
+alertcondition(long_condition, title="Long Signal", message="SKJ Long Signal - Bullish Sweep + Engulf")
+alertcondition(short_condition, title="Short Signal", message="SKJ Short Signal - Bearish Sweep + Engulf")
