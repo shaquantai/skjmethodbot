@@ -1,0 +1,356 @@
+//@version=5
+strategy("SKJ Method v2.0 - Enhanced Smart Money Sniper", shorttitle="SKJ v2.0", overlay=true, max_boxes_count=100, max_lines_count=100, max_labels_count=100, pyramiding=0, initial_capital=250, default_qty_type=strategy.percent_of_equity, default_qty_value=100, commission_type=strategy.commission.percent, commission_value=0.1)
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+// 🎯 USER INPUTS - SIMPLIFIED BUT POWERFUL
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+// Risk Management
+account_size = input.float(250, "Account Size ($)", minval=100, maxval=10000, group="💰 Risk Management")
+risk_per_trade = input.float(1.0, "Risk Per Trade (%)", minval=0.1, maxval=5.0, group="💰 Risk Management")
+max_sl_pips = input.int(15, "Max Stop Loss (Pips)", minval=5, maxval=30, group="💰 Risk Management")
+
+// Core Settings (Keep it simple!)
+liquidity_lookback = input.int(20, "Liquidity Lookback", minval=10, maxval=50, group="🔍 Detection Settings")
+volume_multiplier = input.float(1.5, "Volume Spike Multiplier", minval=1.2, maxval=3.0, group="🔍 Detection Settings")
+volume_lookback = input.int(20, "Volume Average Lookback", minval=10, maxval=50, group="🔍 Detection Settings")
+
+// Filters
+use_session_filter = input.bool(true, "NY Session Only (13:00-21:00 UTC)", group="🕐 Session Filter")
+use_fvg_filter = input.bool(true, "Require FVG Confirmation", group="🎯 Entry Filters")
+sniper_mode = input.bool(false, "Sniper Mode (All 3 Confluences Required)", group="🎯 Entry Filters")
+
+// Visual Settings
+show_individual_signals = input.bool(false, "Show Individual Components", group="🎨 Visual Settings")
+show_fvg_boxes = input.bool(true, "Show FVG Zones", group="🎨 Visual Settings")
+show_levels = input.bool(true, "Show TP/SL Lines", group="🎨 Visual Settings")
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+// 🔧 CORE CALCULATIONS (KEPT FROM YOUR ORIGINAL - THEY WORK!)
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+// ATR and Volume (your original logic enhanced)
+atr = ta.atr(14)
+volume_ma = ta.sma(volume, volume_lookback)
+volume_spike = volume > volume_ma * volume_multiplier
+
+// Price levels (your original)
+recent_high = ta.highest(high, liquidity_lookback)
+recent_low = ta.lowest(low, liquidity_lookback)
+
+// Session Filter
+ny_session = time(timeframe.period, "1300-2100", "UTC")
+is_ny_session = not na(ny_session)
+session_ok = not use_session_filter or is_ny_session
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+// 🪤 LIQUIDITY SWEEP DETECTION (YOUR ORIGINAL LOGIC - ENHANCED)
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+// Your original sweep logic (it was good!)
+bullish_sweep = low < recent_low[1] and close > recent_low[1]
+bearish_sweep = high > recent_high[1] and close < recent_high[1]
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+// 🔥 ENGULFING DETECTION (YOUR ORIGINAL - MADE MORE PRECISE)
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+// Enhanced engulfing (based on your original)
+bull_engulf = close > open and close > high[1] and low < low[1] and (close - open) > (high[1] - low[1]) * 0.5
+bear_engulf = close < open and close < low[1] and high > high[1] and (open - close) > (high[1] - low[1]) * 0.5
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+// 🎯 SIMPLE FVG DETECTION (NEW ADDITION)
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+// Simple 3-candle FVG detection
+bullish_fvg = low > high[2] and low[1] > high[2] and math.abs(low - high[2]) > atr * 0.1
+bearish_fvg = high < low[2] and high[1] < low[2] and math.abs(low[2] - high) > atr * 0.1
+
+// Track if we're in an FVG zone
+var float bull_fvg_top = na
+var float bull_fvg_bottom = na
+var float bear_fvg_top = na
+var float bear_fvg_bottom = na
+
+if bullish_fvg
+    bull_fvg_top := low
+    bull_fvg_bottom := high[2]
+    if show_fvg_boxes
+        box.new(bar_index-2, bull_fvg_bottom, bar_index+10, bull_fvg_top, bgcolor=color.new(color.green, 90), border_color=color.green, border_width=1)
+        label.new(bar_index, bull_fvg_bottom, "FVG 🎯", style=label.style_label_up, color=color.green, textcolor=color.white, size=size.small)
+
+if bearish_fvg
+    bear_fvg_top := low[2]
+    bear_fvg_bottom := high
+    if show_fvg_boxes
+        box.new(bar_index-2, bear_fvg_bottom, bar_index+10, bear_fvg_top, bgcolor=color.new(color.red, 90), border_color=color.red, border_width=1)
+        label.new(bar_index, bear_fvg_top, "FVG 🎯", style=label.style_label_down, color=color.red, textcolor=color.white, size=size.small)
+
+// Check if price is in FVG
+in_bull_fvg = not na(bull_fvg_top) and not na(bull_fvg_bottom) and close >= bull_fvg_bottom and close <= bull_fvg_top
+in_bear_fvg = not na(bear_fvg_top) and not na(bear_fvg_bottom) and close >= bear_fvg_bottom and close <= bear_fvg_top
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+// 🎯 TRAP SIGNALS (YOUR ORIGINAL LOGIC - ENHANCED)
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+// Your original trap logic (it was solid!)
+bullish_trap = bullish_sweep and bull_engulf and session_ok
+bearish_trap = bearish_sweep and bear_engulf and session_ok
+
+// Enhanced with volume (your original concept)
+enhanced_bull_trap = bullish_trap and volume_spike
+enhanced_bear_trap = bearish_trap and volume_spike
+
+// FVG confluence (optional)
+fvg_bull_trap = bullish_trap and (not use_fvg_filter or in_bull_fvg)
+fvg_bear_trap = bearish_trap and (not use_fvg_filter or in_bear_fvg)
+
+// SNIPER MODE (all 3 confluences)
+sniper_bull = bullish_trap and volume_spike and in_bull_fvg
+sniper_bear = bearish_trap and volume_spike and in_bear_fvg
+
+// Final entry conditions
+final_bull_entry = sniper_mode ? sniper_bull : fvg_bull_trap
+final_bear_entry = sniper_mode ? sniper_bear : fvg_bear_trap
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+// 💰 ENHANCED RISK MANAGEMENT (10X IMPROVEMENT)
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+// Calculate position size and levels
+calculate_levels(is_long) =>
+    // Stop loss based on liquidity sweep level
+    sl_distance = is_long ? close - (recent_low - atr * 0.5) : (recent_high + atr * 0.5) - close
+    
+    // Convert to pips and cap at max
+    pip_value = syminfo.mintick * 10
+    sl_pips = sl_distance / pip_value
+    if sl_pips > max_sl_pips
+        sl_distance := max_sl_pips * pip_value
+        sl_pips := max_sl_pips
+    
+    // Calculate prices
+    sl_price = is_long ? close - sl_distance : close + sl_distance
+    tp1_price = is_long ? close + sl_distance : close - sl_distance        // 1R
+    tp2_price = is_long ? close + sl_distance * 2 : close - sl_distance * 2  // 2R
+    tp3_price = is_long ? close + sl_distance * 3 : close - sl_distance * 3  // 3R
+    
+    // Position sizing
+    risk_amount = account_size * (risk_per_trade / 100)
+    position_size = risk_amount / sl_distance
+    
+    [sl_price, tp1_price, tp2_price, tp3_price, position_size, sl_pips]
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+// 🎨 VISUAL SIGNALS (ENHANCED FROM YOUR ORIGINAL)
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+// Individual components (your original idea)
+if show_individual_signals
+    plotshape(bullish_sweep, title="Bull Sweep", location=location.belowbar, color=color.blue, style=shape.circle, size=size.tiny)
+    plotshape(bearish_sweep, title="Bear Sweep", location=location.abovebar, color=color.blue, style=shape.circle, size=size.tiny)
+    plotshape(bull_engulf, title="Bull Engulf", location=location.belowbar, color=color.green, style=shape.triangleup, size=size.tiny)
+    plotshape(bear_engulf, title="Bear Engulf", location=location.abovebar, color=color.red, style=shape.triangledown, size=size.tiny)
+
+// Trap labels (enhanced from your original)
+if bullish_trap
+    label.new(bar_index, low, "🪤 BULL TRAP", style=label.style_label_up, color=color.orange, textcolor=color.white, size=size.normal)
+
+if bearish_trap
+    label.new(bar_index, high, "🪤 BEAR TRAP", style=label.style_label_down, color=color.orange, textcolor=color.white, size=size.normal)
+
+// Enhanced signals (your original concept improved)
+if enhanced_bull_trap
+    label.new(bar_index, low * 0.9995, "🔥 BULL TRAP\n+ VOLUME", style=label.style_label_up, color=color.yellow, textcolor=color.black, size=size.normal)
+
+if enhanced_bear_trap
+    label.new(bar_index, high * 1.0005, "🔥 BEAR TRAP\n+ VOLUME", style=label.style_label_down, color=color.yellow, textcolor=color.black, size=size.normal)
+
+// SNIPER MODE signals
+if sniper_bull
+    label.new(bar_index, low * 0.999, "🎯 SNIPER BULL\nALL CONFLUENCES", style=label.style_label_up, color=color.lime, textcolor=color.black, size=size.large)
+
+if sniper_bear
+    label.new(bar_index, high * 1.001, "🎯 SNIPER BEAR\nALL CONFLUENCES", style=label.style_label_down, color=color.lime, textcolor=color.black, size=size.large)
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+// 🚀 STRATEGY EXECUTION (NEW - MISSING FROM YOUR ORIGINAL)
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+// Track trade levels
+var float entry_price = na
+var float sl_price = na
+var float tp1_price = na
+var float tp2_price = na
+var float tp3_price = na
+var bool tp1_hit = false
+var bool tp2_hit = false
+var bool tp3_hit = false
+
+// LONG ENTRIES
+if final_bull_entry and strategy.position_size == 0
+    [sl, tp1, tp2, tp3, pos_size, sl_pips] = calculate_levels(true)
+    entry_price := close
+    sl_price := sl
+    tp1_price := tp1
+    tp2_price := tp2
+    tp3_price := tp3
+    
+    // Enter trade
+    strategy.entry("Long", strategy.long, qty=pos_size)
+    strategy.exit("SL Long", "Long", stop=sl_price)
+    
+    // Visual feedback
+    label.new(bar_index, low, "🟢 LONG ENTRY\nSL: " + str.tostring(sl_pips, "#.#") + " pips", style=label.style_label_up, color=color.green, textcolor=color.white, size=size.normal)
+    
+    // Draw levels
+    if show_levels
+        line.new(bar_index, tp1_price, bar_index + 20, tp1_price, color=color.green, style=line.style_solid, width=1)
+        line.new(bar_index, tp2_price, bar_index + 20, tp2_price, color=color.green, style=line.style_solid, width=1)
+        line.new(bar_index, tp3_price, bar_index + 20, tp3_price, color=color.green, style=line.style_solid, width=1)
+        line.new(bar_index, sl_price, bar_index + 20, sl_price, color=color.red, style=line.style_dashed, width=2)
+    
+    // Reset TP tracking
+    tp1_hit := false
+    tp2_hit := false
+    tp3_hit := false
+
+// SHORT ENTRIES
+if final_bear_entry and strategy.position_size == 0
+    [sl, tp1, tp2, tp3, pos_size, sl_pips] = calculate_levels(false)
+    entry_price := close
+    sl_price := sl
+    tp1_price := tp1
+    tp2_price := tp2
+    tp3_price := tp3
+    
+    // Enter trade
+    strategy.entry("Short", strategy.short, qty=pos_size)
+    strategy.exit("SL Short", "Short", stop=sl_price)
+    
+    // Visual feedback
+    label.new(bar_index, high, "🔴 SHORT ENTRY\nSL: " + str.tostring(sl_pips, "#.#") + " pips", style=label.style_label_down, color=color.red, textcolor=color.white, size=size.normal)
+    
+    // Draw levels
+    if show_levels
+        line.new(bar_index, tp1_price, bar_index + 20, tp1_price, color=color.red, style=line.style_solid, width=1)
+        line.new(bar_index, tp2_price, bar_index + 20, tp2_price, color=color.red, style=line.style_solid, width=1)
+        line.new(bar_index, tp3_price, bar_index + 20, tp3_price, color=color.red, style=line.style_solid, width=1)
+        line.new(bar_index, sl_price, bar_index + 20, sl_price, color=color.red, style=line.style_dashed, width=2)
+    
+    // Reset TP tracking
+    tp1_hit := false
+    tp2_hit := false
+    tp3_hit := false
+
+// TAKE PROFIT MANAGEMENT (LONG)
+if strategy.position_size > 0 and not na(tp1_price)
+    if not tp1_hit and high >= tp1_price
+        strategy.close("Long", qty_percent=50)
+        label.new(bar_index, high, "TP1 💰", style=label.style_label_down, color=color.green, textcolor=color.white, size=size.small)
+        tp1_hit := true
+    
+    if not tp2_hit and high >= tp2_price
+        strategy.close("Long", qty_percent=30)
+        label.new(bar_index, high, "TP2 💰", style=label.style_label_down, color=color.green, textcolor=color.white, size=size.small)
+        tp2_hit := true
+    
+    if not tp3_hit and high >= tp3_price
+        strategy.close("Long", qty_percent=20)
+        label.new(bar_index, high, "TP3 💰", style=label.style_label_down, color=color.green, textcolor=color.white, size=size.small)
+        tp3_hit := true
+
+// TAKE PROFIT MANAGEMENT (SHORT)
+if strategy.position_size < 0 and not na(tp1_price)
+    if not tp1_hit and low <= tp1_price
+        strategy.close("Short", qty_percent=50)
+        label.new(bar_index, low, "TP1 💰", style=label.style_label_up, color=color.red, textcolor=color.white, size=size.small)
+        tp1_hit := true
+    
+    if not tp2_hit and low <= tp2_price
+        strategy.close("Short", qty_percent=30)
+        label.new(bar_index, low, "TP2 💰", style=label.style_label_up, color=color.red, textcolor=color.white, size=size.small)
+        tp2_hit := true
+    
+    if not tp3_hit and low <= tp3_price
+        strategy.close("Short", qty_percent=20)
+        label.new(bar_index, low, "TP3 💰", style=label.style_label_up, color=color.red, textcolor=color.white, size=size.small)
+        tp3_hit := true
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+// 📊 ENHANCED STATUS TABLE (IMPROVED FROM YOUR ORIGINAL)
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+var table status_table = table.new(position.top_right, 2, 7, bgcolor=color.new(color.black, 80), border_width=1)
+
+if barstate.islast
+    // Header
+    table.cell(status_table, 0, 0, "🎯 SKJ v2.0 ENHANCED", text_color=color.white, bgcolor=color.blue, text_size=size.normal)
+    table.cell(status_table, 1, 0, "STATUS", text_color=color.white, bgcolor=color.blue, text_size=size.normal)
+    
+    // Bull Trap
+    table.cell(status_table, 0, 1, "Bull Trap", text_color=color.white, text_size=size.small)
+    table.cell(status_table, 1, 1, bullish_trap ? "🟢 ACTIVE" : "⚪ NO", text_color=bullish_trap ? color.green : color.gray, text_size=size.small)
+    
+    // Bear Trap
+    table.cell(status_table, 0, 2, "Bear Trap", text_color=color.white, text_size=size.small)
+    table.cell(status_table, 1, 2, bearish_trap ? "🔴 ACTIVE" : "⚪ NO", text_color=bearish_trap ? color.red : color.gray, text_size=size.small)
+    
+    // Volume Boost
+    table.cell(status_table, 0, 3, "Volume Boost", text_color=color.white, text_size=size.small)
+    table.cell(status_table, 1, 3, volume_spike ? "🟡 YES" : "⚪ NO", text_color=volume_spike ? color.yellow : color.gray, text_size=size.small)
+    
+    // FVG Status
+    table.cell(status_table, 0, 4, "In FVG Zone", text_color=color.white, text_size=size.small)
+    table.cell(status_table, 1, 4, (in_bull_fvg or in_bear_fvg) ? "🎯 YES" : "⚪ NO", text_color=(in_bull_fvg or in_bear_fvg) ? color.purple : color.gray, text_size=size.small)
+    
+    // Sniper Mode
+    table.cell(status_table, 0, 5, "Sniper Ready", text_color=color.white, text_size=size.small)
+    table.cell(status_table, 1, 5, (sniper_bull or sniper_bear) ? "🎯 READY" : "⚪ NO", text_color=(sniper_bull or sniper_bear) ? color.lime : color.gray, text_size=size.small)
+    
+    // Session
+    table.cell(status_table, 0, 6, "NY Session", text_color=color.white, text_size=size.small)
+    table.cell(status_table, 1, 6, is_ny_session ? "🟢 OPEN" : "🔴 CLOSED", text_color=is_ny_session ? color.green : color.red, text_size=size.small)
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+// 🚨 ENHANCED ALERTS (10X BETTER THAN ORIGINAL)
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+// Entry alerts with full trade info
+if final_bull_entry
+    confluence_count = (bullish_trap ? 1 : 0) + (volume_spike ? 1 : 0) + (in_bull_fvg ? 1 : 0)
+    alert_msg = "🟢 SKJ LONG ENTRY: " + syminfo.ticker + " | Price: " + str.tostring(close, "#.#####") + " | Confluences: " + str.tostring(confluence_count) + "/3 | Session: " + (is_ny_session ? "NY" : "Off-Hours")
+    alert(alert_msg, alert.freq_once_per_bar)
+
+if final_bear_entry
+    confluence_count = (bearish_trap ? 1 : 0) + (volume_spike ? 1 : 0) + (in_bear_fvg ? 1 : 0)
+    alert_msg = "🔴 SKJ SHORT ENTRY: " + syminfo.ticker + " | Price: " + str.tostring(close, "#.#####") + " | Confluences: " + str.tostring(confluence_count) + "/3 | Session: " + (is_ny_session ? "NY" : "Off-Hours")
+    alert(alert_msg, alert.freq_once_per_bar)
+
+// Sniper mode alerts
+if sniper_bull
+    alert("🎯 SNIPER BULL SETUP: " + syminfo.ticker + " | ALL 3 CONFLUENCES ALIGNED! | Price: " + str.tostring(close, "#.#####"), alert.freq_once_per_bar)
+
+if sniper_bear
+    alert("🎯 SNIPER BEAR SETUP: " + syminfo.ticker + " | ALL 3 CONFLUENCES ALIGNED! | Price: " + str.tostring(close, "#.#####"), alert.freq_once_per_bar)
+
+// TP alerts
+if tp1_hit
+    alert("💰 TP1 HIT: " + syminfo.ticker + " | 50% Position Closed", alert.freq_once_per_bar)
+if tp2_hit
+    alert("💰 TP2 HIT: " + syminfo.ticker + " | 30% Position Closed", alert.freq_once_per_bar)
+if tp3_hit
+    alert("💰 TP3 HIT: " + syminfo.ticker + " | 20% Position Closed", alert.freq_once_per_bar)
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+// 🎨 SESSION VISUALIZATION
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+// Shade off-hours if session filter is on
+bgcolor(use_session_filter and not is_ny_session ? color.new(color.gray, 95) : na, title="Off Hours")
+
+// Add reference EMAs for context
+plot(ta.ema(close, 20), title="EMA 20", color=color.new(color.white, 70), linewidth=1)
+plot(ta.ema(close, 50), title="EMA 50", color=color.new(color.yellow, 70), linewidth=1)
