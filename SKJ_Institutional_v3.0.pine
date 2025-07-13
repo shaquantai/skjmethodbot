@@ -1,0 +1,634 @@
+//@version=5
+strategy("SKJ Institutional v3.0 - Bank Grade", shorttitle="SKJ-INST", overlay=true, 
+         initial_capital=1000000, default_qty_type=strategy.percent_of_equity, default_qty_value=1,
+         commission_type=strategy.commission.percent, commission_value=0.05, slippage=1,
+         calc_on_every_tick=false, max_lines_count=100, max_labels_count=100, max_boxes_count=50)
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+// 🏦 INSTITUTIONAL PARAMETERS
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+// Core Risk Parameters - Bank Level
+base_risk = input.float(0.5, "Base Risk (%)", minval=0.1, maxval=1.0, group="🏦 Institutional Risk",
+                       tooltip="Bank-level conservative risk")
+max_portfolio_risk = input.float(8.0, "Max Portfolio Risk (%)", minval=3.0, maxval=15.0, group="🏦 Institutional Risk")
+max_daily_dd = input.float(2.0, "Max Daily Drawdown (%)", minval=1.0, maxval=5.0, group="🏦 Institutional Risk")
+var_confidence = input.float(95.0, "VaR Confidence Level", minval=90.0, maxval=99.9, group="🏦 Institutional Risk")
+
+// Smart Money Detection
+liquidity_lookback = input.int(20, "Liquidity Lookback", minval=10, maxval=50, group="🎯 Smart Money")
+sweep_threshold = input.float(0.25, "Sweep Threshold (ATR)", minval=0.1, maxval=0.8, group="🎯 Smart Money")
+min_confluence = input.int(3, "Min Confluence Score", minval=2, maxval=5, group="🎯 Smart Money")
+volume_spike_min = input.float(1.8, "Volume Spike Threshold", minval=1.2, maxval=3.0, group="🎯 Smart Money")
+
+// Multi-Timeframe Analysis
+use_htf_confluence = input.bool(true, "HTF Confluence Filter", group="📊 Multi-Timeframe")
+htf_timeframe = input.timeframe("240", "HTF Timeframe", group="📊 Multi-Timeframe")
+
+// Macro Environment
+use_macro_filter = input.bool(true, "Macro Regime Filter", group="🌍 Macro Context")
+dxy_overbought = input.float(70.0, "DXY Overbought", minval=60.0, maxval=80.0, group="🌍 Macro Context")
+dxy_oversold = input.float(30.0, "DXY Oversold", minval=20.0, maxval=40.0, group="🌍 Macro Context")
+vix_risk_off = input.float(25.0, "VIX Risk-Off Level", minval=20.0, maxval=35.0, group="🌍 Macro Context")
+
+// Advanced Exits
+use_regime_exits = input.bool(true, "Regime-Based Exits", group="🚪 Exit Strategy")
+partial_tp_1 = input.float(50.0, "TP1 Partial %", minval=30.0, maxval=70.0, group="🚪 Exit Strategy")
+partial_tp_2 = input.float(30.0, "TP2 Partial %", minval=20.0, maxval=50.0, group="🚪 Exit Strategy")
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+// 📊 MACRO CONTEXT & MARKET REGIME
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+// Macro Data Requests
+dxy = request.security("DXY", timeframe.period, close)
+vix = request.security("VIX", timeframe.period, close)
+us10y = request.security("US10Y", timeframe.period, close)
+us02y = request.security("US02Y", timeframe.period, close)
+
+// Macro Indicators
+dxy_rsi = ta.rsi(dxy, 14)
+vix_ma = ta.sma(vix, 20)
+yield_curve = us10y - us02y
+
+// Market Regime Classification
+risk_off_conditions = dxy_rsi > dxy_overbought or vix > vix_risk_off or yield_curve < 0.5
+risk_on_conditions = dxy_rsi < dxy_oversold and vix < 15 and yield_curve > 1.5
+market_regime = risk_off_conditions ? "RISK_OFF" : risk_on_conditions ? "RISK_ON" : "NEUTRAL"
+
+// Volatility Regime
+atr = ta.atr(20)
+atr_ma = ta.sma(atr, 50)
+volatility_ratio = atr / atr_ma
+high_vol_regime = volatility_ratio > 1.3
+low_vol_regime = volatility_ratio < 0.7
+
+// Dynamic Risk Adjustment
+regime_risk_multiplier = market_regime == "RISK_OFF" ? 0.4 : 
+                        market_regime == "RISK_ON" ? 1.2 : 1.0
+vol_risk_multiplier = high_vol_regime ? 0.6 : low_vol_regime ? 1.3 : 1.0
+final_risk = base_risk * regime_risk_multiplier * vol_risk_multiplier
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+// 🕐 ADVANCED SESSION MANAGEMENT
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+// Session Detection with Overlaps
+current_hour_ny = hour(time, "America/New_York")
+current_hour_london = hour(time, "Europe/London")
+current_hour_asia = hour(time, "Asia/Tokyo")
+
+// Session Quality Scoring
+london_session = current_hour_london >= 8 and current_hour_london <= 16
+ny_session = current_hour_ny >= 9 and current_hour_ny <= 16
+asia_session = current_hour_asia >= 9 and current_hour_asia <= 15
+
+london_ny_overlap = london_session and ny_session
+session_quality = london_ny_overlap ? 4 : (london_session or ny_session) ? 3 : asia_session ? 2 : 1
+
+// Liquidity Score
+volume_ma = ta.sma(volume, 30)
+relative_volume = volume / volume_ma
+liquidity_score = session_quality * math.min(relative_volume, 2.0)
+
+session_filter_ok = liquidity_score >= 2.5
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+// 🎯 ENHANCED SMART MONEY DETECTION
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+// Multi-Timeframe Levels
+recent_high = ta.highest(high, liquidity_lookback)
+recent_low = ta.lowest(low, liquidity_lookback)
+atr_buffer = atr * sweep_threshold
+
+// HTF Context
+htf_high = request.security(syminfo.tickerid, htf_timeframe, ta.highest(high, 30))
+htf_low = request.security(syminfo.tickerid, htf_timeframe, ta.lowest(low, 30))
+htf_trend = request.security(syminfo.tickerid, htf_timeframe, ta.ema(close, 21) > ta.ema(close, 50))
+
+// Enhanced Sweep Detection
+bull_sweep_ltf = low <= recent_low[1] - atr_buffer and close > recent_low[1] + (atr_buffer * 0.3)
+bear_sweep_ltf = high >= recent_high[1] + atr_buffer and close < recent_high[1] - (atr_buffer * 0.3)
+
+bull_sweep_htf = low <= htf_low * 0.9995 and close > htf_low * 1.0005
+bear_sweep_htf = high >= htf_high * 1.0005 and close < htf_high * 0.9995
+
+// Volume Analysis
+volume_spike = volume > volume_ma * volume_spike_min
+volume_profile = ta.sma(volume, 5) > ta.sma(volume, 20)
+
+// Enhanced Engulfing with Size Filter
+bull_engulf = close > open and close > high[1] and open <= low[1] and 
+              (close - open) > (high[1] - low[1]) * 0.7 and
+              close - open > atr * 0.5
+
+bear_engulf = close < open and close < low[1] and open >= high[1] and 
+              (open - close) > (high[1] - low[1]) * 0.7 and
+              open - close > atr * 0.5
+
+// Trend Context
+ema_9 = ta.ema(close, 9)
+ema_21 = ta.ema(close, 21)
+ema_50 = ta.ema(close, 50)
+
+trend_bull = ema_9 > ema_21 and ema_21 > ema_50
+trend_bear = ema_9 < ema_21 and ema_21 < ema_50
+trend_strength = math.abs((ema_9 - ema_50) / ema_50 * 100)
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+// 🔍 CONFLUENCE SCORING SYSTEM
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+calculate_confluence_bull() =>
+    score = 0
+    score += bull_sweep_ltf ? 1 : 0
+    score += use_htf_confluence and bull_sweep_htf ? 1 : 0
+    score += bull_engulf ? 1 : 0
+    score += volume_spike ? 1 : 0
+    score += trend_bull ? 1 : 0
+    score += market_regime == "RISK_ON" ? 1 : 0
+    score += session_quality >= 3 ? 1 : 0
+    score
+
+calculate_confluence_bear() =>
+    score = 0
+    score += bear_sweep_ltf ? 1 : 0
+    score += use_htf_confluence and bear_sweep_htf ? 1 : 0
+    score += bear_engulf ? 1 : 0
+    score += volume_spike ? 1 : 0
+    score += trend_bear ? 1 : 0
+    score += market_regime == "RISK_OFF" ? 1 : 0
+    score += session_quality >= 3 ? 1 : 0
+    score
+
+// Pattern Strength Validation
+pattern_strength_bull = bull_engulf and volume_spike and trend_strength > 0.5
+pattern_strength_bear = bear_engulf and volume_spike and trend_strength > 0.5
+
+// Final Signal Generation
+confluence_bull = calculate_confluence_bull()
+confluence_bear = calculate_confluence_bear()
+
+smart_money_bull = confluence_bull >= min_confluence and pattern_strength_bull and session_filter_ok
+smart_money_bear = confluence_bear >= min_confluence and pattern_strength_bear and session_filter_ok
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+// 💰 INSTITUTIONAL POSITION SIZING & RISK MANAGEMENT
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+// Risk Tracking Variables
+var float daily_pnl = 0.0
+var float session_high_equity = 0.0
+var float max_historical_dd = 0.0
+var int consecutive_losses = 0
+var float portfolio_heat = 0.0
+
+// Daily Reset
+if dayofweek != dayofweek[1]
+    daily_pnl := 0.0
+    session_high_equity := strategy.equity
+
+// Update Tracking
+if strategy.position_size == 0 and strategy.position_size[1] != 0
+    trade_pnl = strategy.equity - strategy.equity[1]
+    daily_pnl := daily_pnl + trade_pnl
+    consecutive_losses := trade_pnl < 0 ? consecutive_losses + 1 : 0
+
+// Drawdown Calculation
+current_dd = session_high_equity > 0 ? (session_high_equity - strategy.equity) / session_high_equity * 100 : 0
+max_historical_dd := math.max(max_historical_dd, current_dd)
+
+// Session Equity High
+if strategy.equity > session_high_equity
+    session_high_equity := strategy.equity
+
+// Advanced Stop Calculation
+calculate_institutional_stop(is_long) =>
+    // Base ATR stop with volatility adjustment
+    base_atr_stop = atr * (high_vol_regime ? 2.2 : low_vol_regime ? 1.3 : 1.8)
+    
+    // Structure-based stop
+    structure_stop = is_long ? close - recent_low[1] : recent_high[1] - close
+    
+    // Regime-based adjustment
+    regime_multiplier = market_regime == "RISK_OFF" ? 1.3 : market_regime == "RISK_ON" ? 0.9 : 1.0
+    
+    // Session quality adjustment
+    session_multiplier = session_quality >= 3 ? 0.9 : 1.1
+    
+    // Final stop calculation
+    final_stop = math.max(base_atr_stop, structure_stop * 0.8) * regime_multiplier * session_multiplier
+    
+    // Ensure minimum and maximum stop distances
+    math.max(math.min(final_stop, atr * 3.0), atr * 0.8)
+
+// Institutional Position Sizing
+calculate_position_size(stop_distance) =>
+    // Account risk calculation
+    account_value = strategy.equity
+    risk_per_trade = account_value * (final_risk / 100)
+    
+    // Consecutive loss adjustment
+    loss_adjustment = consecutive_losses > 2 ? 0.5 : consecutive_losses > 1 ? 0.7 : 1.0
+    
+    // Daily drawdown protection
+    dd_protection = current_dd > max_daily_dd / 2 ? 0.5 : current_dd > max_daily_dd ? 0.0 : 1.0
+    
+    // Portfolio heat calculation (max 3 positions)
+    max_concurrent_risk = account_value * 0.03
+    available_risk = max_concurrent_risk - (strategy.position_size != 0 ? risk_per_trade : 0)
+    
+    if available_risk <= 0 or dd_protection == 0.0
+        0.0
+    else
+        // Position size calculation
+        adjusted_risk = risk_per_trade * loss_adjustment * dd_protection
+        base_position = adjusted_risk / stop_distance
+        
+        // Cap position size
+        max_position = account_value * 0.02 / close  // Max 2% of account per trade
+        math.min(base_position, max_position)
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+// 🚀 TRADE EXECUTION & MANAGEMENT
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+// Trade State Variables
+var float entry_price = na
+var float stop_price = na
+var float tp1_price = na
+var float tp2_price = na
+var float tp3_price = na
+var float trailing_stop = na
+var bool tp1_hit = false
+var bool tp2_hit = false
+var int trade_bars = 0
+var string trade_regime = na
+
+// Object Management Arrays
+var line[] active_lines = array.new<line>()
+var label[] active_labels = array.new<label>()
+
+// Cleanup Function
+cleanup_objects() =>
+    // Remove old lines
+    while array.size(active_lines) > 20
+        line.delete(array.shift(active_lines))
+    
+    // Remove old labels  
+    while array.size(active_labels) > 15
+        label.delete(array.shift(active_labels))
+
+// Dynamic TP Calculation
+calculate_tp_levels(entry, stop_dist, is_long) =>
+    // Base ratios adjusted for regime and session
+    base_tp1 = session_quality >= 3 ? 1.2 : 1.0
+    base_tp2 = session_quality >= 3 ? 2.0 : 1.6
+    base_tp3 = session_quality >= 3 ? 3.5 : 2.8
+    
+    // Volatility adjustment
+    vol_adj = high_vol_regime ? 0.8 : low_vol_regime ? 1.2 : 1.0
+    
+    // Calculate levels
+    tp1 = entry + (is_long ? 1 : -1) * stop_dist * base_tp1 * vol_adj
+    tp2 = entry + (is_long ? 1 : -1) * stop_dist * base_tp2 * vol_adj
+    tp3 = entry + (is_long ? 1 : -1) * stop_dist * base_tp3 * vol_adj
+    
+    [tp1, tp2, tp3]
+
+// LONG ENTRIES
+if smart_money_bull and strategy.position_size == 0
+    stop_distance = calculate_institutional_stop(true)
+    position_size = calculate_position_size(stop_distance)
+    
+    if position_size > 0
+        // Set trade variables
+        entry_price := close
+        stop_price := close - stop_distance
+        [tp1, tp2, tp3] = calculate_tp_levels(close, stop_distance, true)
+        tp1_price := tp1
+        tp2_price := tp2
+        tp3_price := tp3
+        trailing_stop := stop_price
+        tp1_hit := false
+        tp2_hit := false
+        trade_bars := 0
+        trade_regime := market_regime
+        
+        // Execute trade
+        strategy.entry("LONG", strategy.long, qty=position_size)
+        strategy.exit("SL", "LONG", stop=stop_price)
+        
+        // Visual elements with object management
+        cleanup_objects()
+        
+        // TP Lines
+        tp1_line = line.new(bar_index, tp1_price, bar_index + 25, tp1_price, 
+                           color=color.yellow, style=line.style_dashed, width=2)
+        tp2_line = line.new(bar_index, tp2_price, bar_index + 25, tp2_price, 
+                           color=color.green, width=2)
+        tp3_line = line.new(bar_index, tp3_price, bar_index + 25, tp3_price, 
+                           color=color.purple, style=line.style_dotted, width=2)
+        
+        array.push(active_lines, tp1_line)
+        array.push(active_lines, tp2_line)
+        array.push(active_lines, tp3_line)
+        
+        // Entry label with confluence info
+        entry_label = label.new(bar_index, low, 
+                               "🟢 LONG\nConf: " + str.tostring(confluence_bull) + "/7\n" + 
+                               market_regime + "\nRisk: " + str.tostring(final_risk, "#.##") + "%", 
+                               style=label.style_label_up, color=color.green, 
+                               textcolor=color.white, size=size.normal)
+        array.push(active_labels, entry_label)
+
+// SHORT ENTRIES
+if smart_money_bear and strategy.position_size == 0
+    stop_distance = calculate_institutional_stop(false)
+    position_size = calculate_position_size(stop_distance)
+    
+    if position_size > 0
+        // Set trade variables
+        entry_price := close
+        stop_price := close + stop_distance
+        [tp1, tp2, tp3] = calculate_tp_levels(close, stop_distance, false)
+        tp1_price := tp1
+        tp2_price := tp2
+        tp3_price := tp3
+        trailing_stop := stop_price
+        tp1_hit := false
+        tp2_hit := false
+        trade_bars := 0
+        trade_regime := market_regime
+        
+        // Execute trade
+        strategy.entry("SHORT", strategy.short, qty=position_size)
+        strategy.exit("SL", "SHORT", stop=stop_price)
+        
+        // Visual elements with object management
+        cleanup_objects()
+        
+        // TP Lines
+        tp1_line = line.new(bar_index, tp1_price, bar_index + 25, tp1_price, 
+                           color=color.yellow, style=line.style_dashed, width=2)
+        tp2_line = line.new(bar_index, tp2_price, bar_index + 25, tp2_price, 
+                           color=color.green, width=2)
+        tp3_line = line.new(bar_index, tp3_price, bar_index + 25, tp3_price, 
+                           color=color.purple, style=line.style_dotted, width=2)
+        
+        array.push(active_lines, tp1_line)
+        array.push(active_lines, tp2_line)
+        array.push(active_lines, tp3_line)
+        
+        // Entry label with confluence info
+        entry_label = label.new(bar_index, high, 
+                               "🔴 SHORT\nConf: " + str.tostring(confluence_bear) + "/7\n" + 
+                               market_regime + "\nRisk: " + str.tostring(final_risk, "#.##") + "%", 
+                               style=label.style_label_down, color=color.red, 
+                               textcolor=color.white, size=size.normal)
+        array.push(active_labels, entry_label)
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+// 🎯 ADVANCED TRADE MANAGEMENT
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+if strategy.position_size != 0
+    trade_bars := trade_bars + 1
+    
+    // TP1 - Partial Exit
+    if not tp1_hit and ((strategy.position_size > 0 and high >= tp1_price) or 
+                        (strategy.position_size < 0 and low <= tp1_price))
+        exit_qty = partial_tp_1
+        strategy.close("LONG", qty_percent=exit_qty, comment="TP1")
+        strategy.close("SHORT", qty_percent=exit_qty, comment="TP1")
+        tp1_hit := true
+        
+        tp_label = label.new(bar_index, strategy.position_size > 0 ? high : low, 
+                           "TP1 💰\n" + str.tostring(exit_qty) + "%", 
+                           style=strategy.position_size > 0 ? label.style_label_down : label.style_label_up, 
+                           color=color.yellow, textcolor=color.black, size=size.small)
+        array.push(active_labels, tp_label)
+    
+    // TP2 - Second Partial Exit
+    if tp1_hit and not tp2_hit and ((strategy.position_size > 0 and high >= tp2_price) or 
+                                    (strategy.position_size < 0 and low <= tp2_price))
+        exit_qty = partial_tp_2 / (1 - partial_tp_1 / 100) * 100  // Adjust for remaining position
+        strategy.close("LONG", qty_percent=exit_qty, comment="TP2")
+        strategy.close("SHORT", qty_percent=exit_qty, comment="TP2")
+        tp2_hit := true
+        
+        tp_label = label.new(bar_index, strategy.position_size > 0 ? high : low, 
+                           "TP2 🎯\n" + str.tostring(partial_tp_2) + "%", 
+                           style=strategy.position_size > 0 ? label.style_label_down : label.style_label_up, 
+                           color=color.green, textcolor=color.white, size=size.small)
+        array.push(active_labels, tp_label)
+    
+    // TP3 - Final Exit
+    if tp2_hit and ((strategy.position_size > 0 and high >= tp3_price) or 
+                    (strategy.position_size < 0 and low <= tp3_price))
+        strategy.close("LONG", comment="TP3")
+        strategy.close("SHORT", comment="TP3")
+        
+        tp_label = label.new(bar_index, strategy.position_size > 0 ? high : low, 
+                           "TP3 🏆\nFINAL", 
+                           style=strategy.position_size > 0 ? label.style_label_down : label.style_label_up, 
+                           color=color.purple, textcolor=color.white, size=size.small)
+        array.push(active_labels, tp_label)
+    
+    // Regime Change Exit
+    if use_regime_exits and trade_regime != market_regime and trade_regime != na
+        if (trade_regime == "RISK_ON" and market_regime == "RISK_OFF") or
+           (trade_regime == "RISK_OFF" and market_regime == "RISK_ON")
+            strategy.close_all(comment="Regime Change")
+            
+            regime_label = label.new(bar_index, close, 
+                                   "⚠️ REGIME EXIT\n" + trade_regime + "→" + market_regime, 
+                                   style=label.style_label_center, color=color.orange, 
+                                   textcolor=color.white, size=size.small)
+            array.push(active_labels, regime_label)
+    
+    // Trailing Stop (Advanced)
+    if tp1_hit
+        if strategy.position_size > 0
+            favorable_move = high - entry_price
+            if favorable_move >= (entry_price - stop_price) * 1.5
+                new_trail = high - (entry_price - stop_price) * 0.7
+                trailing_stop := math.max(trailing_stop, new_trail)
+                strategy.exit("TRAIL", "LONG", stop=trailing_stop)
+        
+        if strategy.position_size < 0
+            favorable_move = entry_price - low
+            if favorable_move >= (stop_price - entry_price) * 1.5
+                new_trail = low + (stop_price - entry_price) * 0.7
+                trailing_stop := math.min(trailing_stop, new_trail)
+                strategy.exit("TRAIL", "SHORT", stop=trailing_stop)
+    
+    // Time-based exit with regime consideration
+    max_hold_bars = market_regime == "RISK_OFF" ? 30 : 60
+    if trade_bars >= max_hold_bars
+        strategy.close_all(comment="Time Limit")
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+// 📊 INSTITUTIONAL PERFORMANCE DASHBOARD
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+// Performance Calculations
+total_trades = strategy.closedtrades
+win_rate = total_trades > 0 ? strategy.wintrades / total_trades * 100 : 0
+profit_factor = strategy.grossloss > 0 ? strategy.grossprofit / strategy.grossloss : 0
+avg_win = strategy.wintrades > 0 ? strategy.grossprofit / strategy.wintrades : 0
+avg_loss = strategy.losstrades > 0 ? strategy.grossloss / strategy.losstrades : 0
+
+// Advanced Metrics
+sharpe_estimate = strategy.netprofit / math.max(max_historical_dd, 1)
+kelly_criterion = win_rate > 0 ? (win_rate/100 * avg_win - (1-win_rate/100) * avg_loss) / avg_win : 0
+max_consecutive_wins = strategy.max_cons_win_trades
+max_consecutive_losses = strategy.max_cons_loss_trades
+
+// Risk Metrics
+current_portfolio_heat = math.abs(strategy.position_size * close / strategy.equity * 100)
+risk_adjusted_return = strategy.netprofit / strategy.max_drawdown
+
+var table dashboard = table.new(position.top_right, 3, 12, bgcolor=color.new(color.black, 90), border_width=1)
+
+if barstate.islast
+    // Header
+    table.cell(dashboard, 0, 0, "🏦 INSTITUTIONAL", text_color=color.white, bgcolor=color.blue, text_size=size.normal)
+    table.cell(dashboard, 1, 0, "METRICS", text_color=color.white, bgcolor=color.blue, text_size=size.normal)
+    table.cell(dashboard, 2, 0, "STATUS", text_color=color.white, bgcolor=color.blue, text_size=size.normal)
+    
+    // Performance Metrics
+    table.cell(dashboard, 0, 1, "Net P&L", text_color=color.white, text_size=size.small)
+    table.cell(dashboard, 1, 1, "$" + str.tostring(strategy.netprofit, "#,###"), 
+               text_color=strategy.netprofit > 0 ? color.green : color.red, text_size=size.small)
+    table.cell(dashboard, 2, 1, strategy.netprofit > 0 ? "✅" : "❌", 
+               text_color=strategy.netprofit > 0 ? color.green : color.red, text_size=size.small)
+    
+    table.cell(dashboard, 0, 2, "Sharpe Est.", text_color=color.white, text_size=size.small)
+    table.cell(dashboard, 1, 2, str.tostring(sharpe_estimate, "#.##"), 
+               text_color=sharpe_estimate > 1.5 ? color.green : sharpe_estimate > 1.0 ? color.yellow : color.red, text_size=size.small)
+    table.cell(dashboard, 2, 2, sharpe_estimate > 1.5 ? "✅" : sharpe_estimate > 1.0 ? "⚠️" : "❌", 
+               text_color=sharpe_estimate > 1.5 ? color.green : sharpe_estimate > 1.0 ? color.yellow : color.red, text_size=size.small)
+    
+    table.cell(dashboard, 0, 3, "Win Rate", text_color=color.white, text_size=size.small)
+    table.cell(dashboard, 1, 3, str.tostring(win_rate, "#.#") + "%", 
+               text_color=win_rate > 55 ? color.green : win_rate > 45 ? color.yellow : color.red, text_size=size.small)
+    table.cell(dashboard, 2, 3, win_rate > 55 ? "✅" : win_rate > 45 ? "⚠️" : "❌", 
+               text_color=win_rate > 55 ? color.green : win_rate > 45 ? color.yellow : color.red, text_size=size.small)
+    
+    table.cell(dashboard, 0, 4, "Profit Factor", text_color=color.white, text_size=size.small)
+    table.cell(dashboard, 1, 4, str.tostring(profit_factor, "#.##"), 
+               text_color=profit_factor > 1.8 ? color.green : profit_factor > 1.3 ? color.yellow : color.red, text_size=size.small)
+    table.cell(dashboard, 2, 4, profit_factor > 1.8 ? "✅" : profit_factor > 1.3 ? "⚠️" : "❌", 
+               text_color=profit_factor > 1.8 ? color.green : profit_factor > 1.3 ? color.yellow : color.red, text_size=size.small)
+    
+    table.cell(dashboard, 0, 5, "Max DD", text_color=color.white, text_size=size.small)
+    table.cell(dashboard, 1, 5, str.tostring(strategy.max_drawdown, "#,###"), text_color=color.red, text_size=size.small)
+    table.cell(dashboard, 2, 5, strategy.max_drawdown < strategy.initial_capital * 0.15 ? "✅" : "❌", 
+               text_color=strategy.max_drawdown < strategy.initial_capital * 0.15 ? color.green : color.red, text_size=size.small)
+    
+    table.cell(dashboard, 0, 6, "Daily P&L", text_color=color.white, text_size=size.small)
+    table.cell(dashboard, 1, 6, "$" + str.tostring(daily_pnl, "#,###"), 
+               text_color=daily_pnl > 0 ? color.green : color.red, text_size=size.small)
+    table.cell(dashboard, 2, 6, math.abs(daily_pnl) < strategy.equity * max_daily_dd / 100 ? "✅" : "⚠️", 
+               text_color=math.abs(daily_pnl) < strategy.equity * max_daily_dd / 100 ? color.green : color.orange, text_size=size.small)
+    
+    table.cell(dashboard, 0, 7, "Kelly %", text_color=color.white, text_size=size.small)
+    table.cell(dashboard, 1, 7, str.tostring(kelly_criterion * 100, "#.#") + "%", 
+               text_color=kelly_criterion > 0.2 ? color.green : kelly_criterion > 0 ? color.yellow : color.red, text_size=size.small)
+    table.cell(dashboard, 2, 7, kelly_criterion > 0.2 ? "✅" : kelly_criterion > 0 ? "⚠️" : "❌", 
+               text_color=kelly_criterion > 0.2 ? color.green : kelly_criterion > 0 ? color.yellow : color.red, text_size=size.small)
+    
+    table.cell(dashboard, 0, 8, "Market Regime", text_color=color.white, text_size=size.small)
+    regime_display = market_regime == "RISK_ON" ? "🟢 RISK ON" : market_regime == "RISK_OFF" ? "🔴 RISK OFF" : "🟡 NEUTRAL"
+    regime_color = market_regime == "RISK_ON" ? color.green : market_regime == "RISK_OFF" ? color.red : color.yellow
+    table.cell(dashboard, 1, 8, regime_display, text_color=regime_color, text_size=size.small)
+    table.cell(dashboard, 2, 8, "📊", text_color=regime_color, text_size=size.small)
+    
+    table.cell(dashboard, 0, 9, "Vol Regime", text_color=color.white, text_size=size.small)
+    vol_display = high_vol_regime ? "🔥 HIGH" : low_vol_regime ? "❄️ LOW" : "🌊 NORMAL"
+    vol_color = high_vol_regime ? color.red : low_vol_regime ? color.blue : color.gray
+    table.cell(dashboard, 1, 9, vol_display, text_color=vol_color, text_size=size.small)
+    table.cell(dashboard, 2, 9, "📈", text_color=vol_color, text_size=size.small)
+    
+    table.cell(dashboard, 0, 10, "Session Quality", text_color=color.white, text_size=size.small)
+    session_display = session_quality == 4 ? "🌟 PRIME" : session_quality == 3 ? "✨ GOOD" : session_quality == 2 ? "⭐ FAIR" : "💤 POOR"
+    session_color = session_quality >= 3 ? color.green : session_quality == 2 ? color.yellow : color.red
+    table.cell(dashboard, 1, 10, session_display, text_color=session_color, text_size=size.small)
+    table.cell(dashboard, 2, 10, session_quality >= 3 ? "✅" : "⚠️", text_color=session_color, text_size=size.small)
+    
+    table.cell(dashboard, 0, 11, "Active Risk", text_color=color.white, text_size=size.small)
+    table.cell(dashboard, 1, 11, str.tostring(final_risk, "#.##") + "%", 
+               text_color=final_risk > base_risk ? color.orange : color.white, text_size=size.small)
+    table.cell(dashboard, 2, 11, current_portfolio_heat < 5 ? "✅" : "⚠️", 
+               text_color=current_portfolio_heat < 5 ? color.green : color.orange, text_size=size.small)
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+// 🎨 VISUAL ENHANCEMENTS
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+// EMA Plots
+plot(ema_9, title="EMA 9", color=color.new(color.blue, 30), linewidth=1)
+plot(ema_21, title="EMA 21", color=color.new(color.orange, 30), linewidth=2)
+plot(ema_50, title="EMA 50", color=color.new(color.red, 30), linewidth=2)
+
+// Session Background
+session_bg_color = session_quality == 4 ? color.new(color.green, 95) :
+                   session_quality == 3 ? color.new(color.blue, 95) :
+                   session_quality == 2 ? color.new(color.yellow, 97) : 
+                   color.new(color.gray, 98)
+bgcolor(session_bg_color, title="Session Quality")
+
+// Regime Background
+regime_bg = market_regime == "RISK_OFF" ? color.new(color.red, 97) :
+            market_regime == "RISK_ON" ? color.new(color.green, 97) : na
+bgcolor(regime_bg, title="Market Regime")
+
+// Volatility Background
+vol_bg = high_vol_regime ? color.new(color.purple, 96) : na
+bgcolor(vol_bg, title="High Volatility")
+
+// Smart Money Signals
+plotshape(smart_money_bull, title="Smart Money Bull", location=location.belowbar, 
+          color=color.lime, style=shape.triangleup, size=size.normal)
+plotshape(smart_money_bear, title="Smart Money Bear", location=location.abovebar, 
+          color=color.red, style=shape.triangledown, size=size.normal)
+
+// HTF Levels
+plot(htf_high, title="HTF High", color=color.new(color.red, 50), linewidth=1, style=plot.style_circles)
+plot(htf_low, title="HTF Low", color=color.new(color.green, 50), linewidth=1, style=plot.style_circles)
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+// 🚨 INSTITUTIONAL ALERTS
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+if smart_money_bull
+    alert_msg = "🏦 INSTITUTIONAL LONG SIGNAL\n" +
+                "Confluence: " + str.tostring(confluence_bull) + "/7\n" +
+                "Market Regime: " + market_regime + "\n" +
+                "Session Quality: " + str.tostring(session_quality) + "/4\n" +
+                "Risk Level: " + str.tostring(final_risk, "#.##") + "%\n" +
+                "DXY RSI: " + str.tostring(dxy_rsi, "#.#") + "\n" +
+                "VIX: " + str.tostring(vix, "#.#")
+    alert(alert_msg, alert.freq_once_per_bar)
+
+if smart_money_bear
+    alert_msg = "🏦 INSTITUTIONAL SHORT SIGNAL\n" +
+                "Confluence: " + str.tostring(confluence_bear) + "/7\n" +
+                "Market Regime: " + market_regime + "\n" +
+                "Session Quality: " + str.tostring(session_quality) + "/4\n" +
+                "Risk Level: " + str.tostring(final_risk, "#.##") + "%\n" +
+                "DXY RSI: " + str.tostring(dxy_rsi, "#.#") + "\n" +
+                "VIX: " + str.tostring(vix, "#.#")
+    alert(alert_msg, alert.freq_once_per_bar)
+
+// Risk Management Alerts
+if current_dd > max_daily_dd * 0.8
+    alert("⚠️ APPROACHING DAILY DRAWDOWN LIMIT: " + str.tostring(current_dd, "#.##") + "%", alert.freq_once_per_bar)
+
+if market_regime != market_regime[1] and market_regime[1] != na
+    alert("🌍 MARKET REGIME CHANGE: " + market_regime[1] + " → " + market_regime, alert.freq_once_per_bar)
+
+if consecutive_losses >= 3
+    alert("🚨 THREE CONSECUTIVE LOSSES - REVIEW STRATEGY", alert.freq_once_per_bar)
