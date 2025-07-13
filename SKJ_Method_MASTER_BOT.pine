@@ -1,0 +1,139 @@
+//@version=5
+strategy("SKJ Method MASTER BOT vFinal_001", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=2, initial_capital=10000, slippage=2)
+
+// === INPUTS ===
+liqLookback = input.int(20, "Liquidity Sweep Lookback")
+volumeMultiplier = input.float(1.5, "Volume Spike Multiplier")
+slMult = input.float(1.5, "SL Multiplier")
+tpMult = input.float(2.0, "TP Multiplier")
+showFVG = input.bool(true, "Show FVGs")
+showOB = input.bool(true, "Show Order Blocks")
+showSD = input.bool(true, "Show Supply/Demand Zones")
+useSniperOnly = input.bool(true, "Sniper Entry Filter")
+showPatterns = input.bool(true, "Show Pattern Labels")
+htfTF = input.timeframe("4H", "HTF for Sweep Detection")
+avoidNewsHours = input.bool(true, "Avoid High Impact News Time (Manual Toggle)")
+avoidEOD = input.bool(true, "Avoid End-of-Day Setups (Manual Toggle)")
+
+// === BASE CALCULATIONS ===
+atr = ta.atr(14)
+ema50 = ta.ema(close, 50)
+volAvg = ta.sma(volume, 20)
+
+// === LIQUIDITY SWEEPS ===
+recentHigh = ta.highest(high, liqLookback)
+recentLow = ta.lowest(low, liqLookback)
+bullSweep = low < recentLow[1] and close > recentLow[1]
+bearSweep = high > recentHigh[1] and close < recentHigh[1]
+
+// === ENGULFING ===
+bullEngulf = close > open and close[1] < open[1] and close > open[1] and open < close[1]
+bearEngulf = close < open and close[1] > open[1] and close < open[1] and open > close[1]
+
+// === FVG ===
+bullFVG = low > high[2]
+bearFVG = high < low[2]
+
+// === ICEBERG ===
+icebergBuy = volume > volAvg * 2.5 and ta.change(close) > atr * 0.5
+icebergSell = volume > volAvg * 2.5 and ta.change(close) < -atr * 0.5
+
+// === VOLUME ===
+volSpike = volume > volAvg * volumeMultiplier
+
+// === TREND ===
+isBull = close > ema50
+isBear = close < ema50
+
+// === PATTERN SCANNER ===
+doubleTop = high[1] > high[2] and high[1] > high and math.abs(high[1] - high[3]) < atr * 0.3
+doubleBottom = low[1] < low[2] and low[1] < low and math.abs(low[1] - low[3]) < atr * 0.3
+wedge = (high > high[1] and low > low[1] and close < open)
+flag = ta.crossover(close, ema50) and close < high[1] and close > low[1]
+
+// === HTF SWEEP ===
+htfHigh = request.security(syminfo.tickerid, htfTF, ta.highest(high, liqLookback))
+htfLow = request.security(syminfo.tickerid, htfTF, ta.lowest(low, liqLookback))
+htfBullSweep = low < htfLow
+htfBearSweep = high > htfHigh
+
+// === SUPPLY/DEMAND (ZONES) ===
+demandZone = ta.lowest(close, 15)
+supplyZone = ta.highest(close, 15)
+
+// === ORDER BLOCKS ===
+bullOB = close[1] < open[1] and close > open and low < low[1]
+bearOB = close[1] > open[1] and close < open and high > high[1]
+
+// === SNIPER ENTRY FILTER ===
+fullConfluenceLong = bullSweep and bullEngulf and bullFVG and volSpike and icebergBuy and htfBullSweep and isBull
+fullConfluenceShort = bearSweep and bearEngulf and bearFVG and volSpike and icebergSell and htfBearSweep and isBear
+
+longEntry = useSniperOnly ? fullConfluenceLong : bullSweep and bullEngulf and bullFVG and volSpike and isBull
+shortEntry = useSniperOnly ? fullConfluenceShort : bearSweep and bearEngulf and bearFVG and volSpike and isBear
+
+// === TRADE EXECUTION ===
+if longEntry and not avoidNewsHours and not avoidEOD
+    strategy.entry("BUY", strategy.long)
+    strategy.exit("TP1/2/3", "BUY", stop=low - atr * slMult, limit=close + atr * tpMult)
+if shortEntry and not avoidNewsHours and not avoidEOD
+    strategy.entry("SELL", strategy.short)
+    strategy.exit("TP1/2/3", "SELL", stop=high + atr * slMult, limit=close - atr * tpMult)
+
+// === LABELS & MARKERS ===
+plotshape(bullSweep, title="Bull Sweep", location=location.belowbar, style=shape.triangleup, color=color.blue)
+plotshape(bearSweep, title="Bear Sweep", location=location.abovebar, style=shape.triangledown, color=color.orange)
+
+plotshape(bullEngulf, title="Bull Engulf", location=location.belowbar, style=shape.triangleup, color=color.green, size=size.tiny)
+plotshape(bearEngulf, title="Bear Engulf", location=location.abovebar, style=shape.triangledown, color=color.red, size=size.tiny)
+
+plotshape(showFVG and bullFVG, location=location.belowbar, style=shape.circle, color=color.lime)
+plotshape(showFVG and bearFVG, location=location.abovebar, style=shape.circle, color=color.maroon)
+
+if longEntry
+    label.new(bar_index, low, "🪤 TRAP SET", style=label.style_label_up, textcolor=color.white, color=color.green)
+if shortEntry
+    label.new(bar_index, high, "🪤 TRAP SET", style=label.style_label_down, textcolor=color.white, color=color.red)
+
+if icebergBuy
+    label.new(bar_index, low, "❄️ ICEBERG", style=label.style_label_up, textcolor=color.white, color=color.navy)
+if icebergSell
+    label.new(bar_index, high, "❄️ ICEBERG", style=label.style_label_down, textcolor=color.white, color=color.navy)
+
+if fullConfluenceLong
+    label.new(bar_index, low, "Quant Entry 🔐", style=label.style_label_up, textcolor=color.white, color=color.purple)
+if fullConfluenceShort
+    label.new(bar_index, high, "Quant Entry 🔐", style=label.style_label_down, textcolor=color.white, color=color.purple)
+
+// === TP1 / TP2 / TP3 VISUALS ===
+tp1 = strategy.position_avg_price + atr * 0.75 * (strategy.position_size > 0 ? 1 : -1)
+tp2 = strategy.position_avg_price + atr * 1.5 * (strategy.position_size > 0 ? 1 : -1)
+tp3 = strategy.position_avg_price + atr * 2.5 * (strategy.position_size > 0 ? 1 : -1)
+plot(strategy.position_size > 0 ? tp1 : na, title="TP1", color=color.green, linewidth=1)
+plot(strategy.position_size > 0 ? tp2 : na, title="TP2", color=color.green, linewidth=1)
+plot(strategy.position_size > 0 ? tp3 : na, title="TP3", color=color.green, linewidth=1)
+plot(strategy.position_size < 0 ? tp1 : na, title="TP1", color=color.red, linewidth=1)
+plot(strategy.position_size < 0 ? tp2 : na, title="TP2", color=color.red, linewidth=1)
+plot(strategy.position_size < 0 ? tp3 : na, title="TP3", color=color.red, linewidth=1)
+
+// === PATTERN LABELS ===
+if showPatterns and doubleTop
+    label.new(bar_index, high, "🧠 Double Top", style=label.style_label_down, color=color.orange)
+if showPatterns and doubleBottom
+    label.new(bar_index, low, "🧠 Double Bottom", style=label.style_label_up, color=color.teal)
+if showPatterns and wedge
+    label.new(bar_index, high, "🧠 Wedge", style=label.style_label_down, color=color.gray)
+if showPatterns and flag
+    label.new(bar_index, low, "🧠 Flag", style=label.style_label_up, color=color.gray)
+
+// === OB / S&D ===
+plotshape(showOB and bullOB, location=location.belowbar, style=shape.square, size=size.tiny, color=color.green)
+plotshape(showOB and bearOB, location=location.abovebar, style=shape.square, size=size.tiny, color=color.red)
+plot(showSD ? demandZone : na, title="Demand", color=color.teal)
+plot(showSD ? supplyZone : na, title="Supply", color=color.fuchsia)
+
+// === ALERTS ===
+alertcondition(fullConfluenceLong, title="🚨 99% Long", message="🚨 99% SETUP | Drop that Lot 📦💰")
+alertcondition(fullConfluenceShort, title="🚨 99% Short", message="🚨 99% SETUP | Drop that Lot 📦💰")
+alertcondition(longEntry, title="SKJ BUY", message="🟢 SKJ BUY Trap Set")
+alertcondition(shortEntry, title="SKJ SELL", message="🔴 SKJ SELL Trap Set")
